@@ -5,6 +5,8 @@ export type SourcePlatform =
   | 'workday'
   | 'linkedin'
   | 'indeed'
+  | 'bandana'
+  | 'recruiterbox'
   | 'generic'
 
 export function detectPlatform(url: string): SourcePlatform {
@@ -16,6 +18,8 @@ export function detectPlatform(url: string): SourcePlatform {
   if (host.includes('myworkdayjobs.com') || host.includes('workday.com')) return 'workday'
   if (host.includes('linkedin.com')) return 'linkedin'
   if (host.includes('indeed.com')) return 'indeed'
+  if (host === 'bandana.com' || host.endsWith('.bandana.com')) return 'bandana'
+  if (host.includes('recruiterbox.com') || host.includes('trakstar.com')) return 'recruiterbox'
 
   return 'generic'
 }

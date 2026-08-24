@@ -9,6 +9,8 @@ export const jobSchema = z.object({
     'workday',
     'linkedin',
     'indeed',
+    'bandana',
+    'recruiterbox',
     'generic',
   ]),
   scraped_at: z.string(),
@@ -33,7 +35,7 @@ export const jobSchema = z.object({
     min: z.number().nullable(),
     max: z.number().nullable(),
     currency: z.string().nullable(),
-    period: z.enum(['year', 'hour']).nullable(),
+    period: z.enum(['year', 'month', 'week', 'hour']).nullable(),
     raw: z.string().nullable(),
   }),
 
