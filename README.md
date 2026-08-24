@@ -43,19 +43,25 @@ Platform is a label on the canonical host, not a switch statement the pipeline d
     "source_platform": "generic",
     "title": "...",
     "company": "...",
+    "description": "Plain-language writeup of the role from the posting.",
     "employment_type": "full_time",
     "location": { "raw": "...", "remote_type": "hybrid" },
     "compensation": { "min": 640, "max": 640, "period": "week", "raw": "$640/week" },
     "requirements": { "required": [], "preferred": [], "degree": "none_stated", "tech_stack": [] },
     "apply_url": "https://...",
     "benefits": []
+  },
+  "decipher": {
+    "kind": "posting",
+    "hops": ["https://loom.ly/...", "https://canonical-posting.example/jobs/123"],
+    "reason": "Single job description is the main content."
   }
 }
 ```
 
 Schema lives in `src/schema.ts`. No auth, no DB, no persistence.
 
-If the decipherer cannot reach a posting, the response should say so (`listing`, `blocked`, hop limit) instead of returning a hollow job object.
+If the decipherer cannot reach a posting, the response is **422** with `kind` of `listing`, `blocked`, or `hop_limit` — not a hollow job object.
 
 ## Run
 
@@ -75,6 +81,6 @@ Logs are verbose on purpose: each hop, scrape, and Gemini parse is a timestamped
 
 ## What is built vs next
 
-**Built:** scrape + structured extract, HTTP redirect following, request logging. A direct posting URL (or a shortener that is a plain 301/307) already works.
+**Built:** HTTP redirects, page classification, in-page hops (capped), structured extract with a `description` field, and honest 422s when the page is a listing or blocked.
 
-**Next:** page classification and in-page hops — the actual decipherer. Until that exists, a careers listing or a login wall can still be sent to Gemini as if it were a posting. That is the gap this README is describing.
+**Still hard:** login walls, JS-only buttons with no real URL, and picking one job off a multi-job board (that should stay a listing failure).
