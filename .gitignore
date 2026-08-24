@@ -1,0 +1,14 @@
+# dependencies
+node_modules/
+
+# secrets — keep .env.example, never commit real keys
+.env
+.env.*
+!.env.example
+
+# logs and OS
+*.log
+.DS_Store
+
+# build
+dist/
