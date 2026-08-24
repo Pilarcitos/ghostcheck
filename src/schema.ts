@@ -17,6 +17,7 @@ export const jobSchema = z.object({
 
   title: z.string(),
   company: z.string(),
+  description: z.string(),
   department_team: z.string().nullable(),
   seniority: z
     .enum(['intern', 'entry', 'mid', 'senior', 'staff', 'lead', 'manager', 'director', 'exec'])

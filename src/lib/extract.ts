@@ -1,18 +1,17 @@
 import { createHash } from 'node:crypto'
 import { detectPlatform } from './platform'
-import { fetchMarkdown } from './firecrawl'
 import { extractedFieldsSchema, jobSchema, type ExtractedFields, type Job } from '../schema'
 import { elapsedMs, type Logger } from './logger'
-import { resolveSourceUrl } from './resolveUrl'
-
-const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-3.5-flash'
-const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`
+import { generateJson } from './gemini'
+import { DecipherError, decipherToPosting } from './decipher'
+import type { PageKind } from './classify'
 
 const EXTRACTION_SCHEMA = {
   type: 'OBJECT',
   properties: {
     title: { type: 'STRING' },
     company: { type: 'STRING' },
+    description: { type: 'STRING' },
     department_team: { type: 'STRING', nullable: true },
     seniority: {
       type: 'STRING',
@@ -70,6 +69,7 @@ const EXTRACTION_SCHEMA = {
   required: [
     'title',
     'company',
+    'description',
     'department_team',
     'seniority',
     'employment_type',
@@ -83,28 +83,22 @@ const EXTRACTION_SCHEMA = {
   ],
 } as const
 
-const EXTRACTION_PROMPT = `Extract structured job posting fields from this page.
+function extractionPrompt(pageKind: PageKind | 'posting' | 'apply_form'): string {
+  const formNote =
+    pageKind === 'apply_form'
+      ? '- This page mixes an application form with a job description. Use only the description. Ignore form fields, EEO self-ID, and "fetching LinkedIn" widgets.\n'
+      : ''
+
+  return `Extract structured fields from this job posting page.
 
 Rules:
-- Use only the job posting. Ignore application-form questions, EEO self-identification, cookie banners, and "fetching your LinkedIn profile" widgets.
-- Do not invent requirements, pay, or benefits that are not on the page.
+${formNote}- description is the posting's own writeup of the role: what the work is and what you would do. Plain prose, 1-4 paragraphs. Do not copy navigation, application questions, or EEO boilerplate.
+- Do not invent requirements, pay, benefits, or duties that are not on the page.
 - If pay is listed per week, set compensation.period to "week". Per month -> "month". Per hour -> "hour". Salary / per year -> "year".
 - application_deadline must be YYYY-MM-DD when a due date is stated, otherwise null.
 - apply_url must be an absolute http(s) URL. If the page only has a relative apply link, use the source URL.
 - For internships, employment_type is "internship" and seniority is "intern" unless the posting clearly says otherwise.
 - Eligibility rules (citizenship, age range, driver's license, background check) belong in requirements.required.`
-
-type GeminiGenerateResponse = {
-  candidates?: Array<{
-    finishReason?: string
-    content?: { parts?: Array<{ text?: string }> }
-  }>
-  usageMetadata?: {
-    promptTokenCount?: number
-    candidatesTokenCount?: number
-    totalTokenCount?: number
-  }
-  error?: { message?: string; status?: string }
 }
 
 function parseExtractedFields(raw: unknown, fallbackApplyUrl: string, log: Logger): ExtractedFields {
@@ -116,6 +110,7 @@ function parseExtractedFields(raw: unknown, fallbackApplyUrl: string, log: Logge
       employment_type: first.data.employment_type,
       seniority: first.data.seniority,
       apply_url: first.data.apply_url,
+      description_chars: first.data.description.length,
     })
     return first.data
   }
@@ -146,102 +141,26 @@ function parseExtractedFields(raw: unknown, fallbackApplyUrl: string, log: Logge
   throw new Error(`Gemini extraction failed schema validation: ${issues.join('; ')}`)
 }
 
-async function extractFields(markdown: string, sourceUrl: string, log: Logger): Promise<ExtractedFields> {
-  const apiKey = process.env.GEMINI_API_KEY
-  if (!apiKey) {
-    log.error('Cannot call Gemini because GEMINI_API_KEY is missing from the environment.')
-    throw new Error('GEMINI_API_KEY is not set')
-  }
+async function extractFields(
+  markdown: string,
+  sourceUrl: string,
+  pageKind: 'posting' | 'apply_form',
+  log: Logger,
+): Promise<ExtractedFields> {
+  const prompt = `${extractionPrompt(pageKind)}\n\nSource URL: ${sourceUrl}\n\nPage markdown:\n${markdown}`
 
-  const prompt = `${EXTRACTION_PROMPT}\n\nSource URL: ${sourceUrl}\n\nPage markdown:\n${markdown}`
-
-  log.info(
-    'Calling Gemini to map page markdown onto the job schema. The model is forced to return JSON that matches responseSchema.',
-    {
-      model: GEMINI_MODEL,
-      endpoint: GEMINI_API_URL,
-      prompt_chars: prompt.length,
-      markdown_chars: markdown.length,
-      max_output_tokens: 4096,
-    },
-  )
-
-  const startedAt = performance.now()
-  const res = await fetch(GEMINI_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey,
-    },
-    body: JSON.stringify({
-      contents: [
-        {
-          parts: [{ text: prompt }],
-        },
-      ],
-      generationConfig: {
-        responseMimeType: 'application/json',
-        responseSchema: EXTRACTION_SCHEMA,
-        maxOutputTokens: 4096,
-      },
-    }),
+  log.info('Calling Gemini to map the deciphered posting onto the job schema.', {
+    page_kind: pageKind,
+    prompt_chars: prompt.length,
+    markdown_chars: markdown.length,
   })
 
-  const rawBody = await res.text()
-  log.info('Received an HTTP response from Gemini.', {
-    status: res.status,
-    status_text: res.statusText,
-    elapsed_ms: elapsedMs(startedAt),
-    body_bytes: rawBody.length,
+  const parsedJson = await generateJson({
+    prompt,
+    schema: EXTRACTION_SCHEMA,
+    maxOutputTokens: 4096,
+    log,
   })
-
-  if (!res.ok) {
-    log.error('Gemini rejected the generateContent request.', {
-      status: res.status,
-      body: rawBody,
-    })
-    throw new Error(`Gemini API request failed (${res.status}): ${rawBody}`)
-  }
-
-  let data: GeminiGenerateResponse
-  try {
-    data = JSON.parse(rawBody) as GeminiGenerateResponse
-  } catch (err) {
-    log.error('Gemini returned a non-JSON HTTP body.', {
-      parse_error: err instanceof Error ? err.message : String(err),
-      body: rawBody,
-    })
-    throw new Error('Gemini returned invalid JSON')
-  }
-
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text
-  const finishReason = data.candidates?.[0]?.finishReason ?? null
-
-  log.info('Parsed the Gemini generateContent payload.', {
-    finish_reason: finishReason,
-    has_text: Boolean(text),
-    text_chars: text?.length ?? 0,
-    prompt_tokens: data.usageMetadata?.promptTokenCount ?? null,
-    output_tokens: data.usageMetadata?.candidatesTokenCount ?? null,
-    total_tokens: data.usageMetadata?.totalTokenCount ?? null,
-    api_error: data.error?.message ?? null,
-  })
-
-  if (!text) {
-    log.error('Gemini did not return a text part containing JSON. Extraction cannot continue.')
-    throw new Error('Gemini did not return a structured extraction')
-  }
-
-  let parsedJson: unknown
-  try {
-    parsedJson = JSON.parse(text)
-  } catch (err) {
-    log.error('Gemini text part was not valid JSON.', {
-      parse_error: err instanceof Error ? err.message : String(err),
-      text,
-    })
-    throw new Error('Gemini returned non-JSON structured output')
-  }
 
   log.info('Gemini returned JSON. Validating it against the Zod extraction schema.', {
     top_level_keys: parsedJson && typeof parsedJson === 'object' ? Object.keys(parsedJson as object) : [],
@@ -250,30 +169,39 @@ async function extractFields(markdown: string, sourceUrl: string, log: Logger): 
   return parseExtractedFields(parsedJson, sourceUrl, log)
 }
 
-export async function extractJob(url: string, log: Logger): Promise<Job> {
+export type ExtractResult = {
+  job: Job
+  decipher: {
+    kind: 'posting' | 'apply_form'
+    hops: string[]
+    reason: string
+  }
+}
+
+export async function extractJob(url: string, log: Logger): Promise<ExtractResult> {
   const pipelineStartedAt = performance.now()
   log.info(
-    'Starting job extraction. Steps: normalize URL, follow redirects, scrape markdown, extract fields with Gemini, validate the final job object.',
+    'Starting job extraction. Steps: decipher the link to a posting, extract fields with Gemini, validate the job object.',
     { client_url: url },
   )
 
-  const resolved = await resolveSourceUrl(url, log.child('url'))
-  const scrapeUrl = resolved.canonical
+  const posting = await decipherToPosting(url, log.child('decipher'))
+  const scrapeUrl = posting.page.url
   const platform = detectPlatform(scrapeUrl)
+  const markdown = posting.page.markdown
+  const hash = createHash('sha256').update(markdown).digest('hex')
 
   log.info('Detected the hiring platform from the canonical hostname. This value is set by our code, not by Gemini.', {
     canonical_url: scrapeUrl,
     source_platform: platform,
-    redirect_hops: resolved.hops.length,
+    page_kind: posting.kind,
+    hops: posting.hops,
   })
-
-  const markdown = await fetchMarkdown(scrapeUrl, log.child('firecrawl'))
-  const hash = createHash('sha256').update(markdown).digest('hex')
   log.info('Computed a SHA-256 hash of the scraped markdown so identical page bodies can be compared later.', {
     raw_description_hash: hash,
   })
 
-  const fields = await extractFields(markdown, scrapeUrl, log.child('gemini'))
+  const fields = await extractFields(markdown, scrapeUrl, posting.kind, log.child('gemini'))
 
   const job: Job = {
     ...fields,
@@ -289,6 +217,7 @@ export async function extractJob(url: string, log: Logger): Promise<Job> {
     source_platform: job.source_platform,
     employment_type: job.employment_type,
     seniority: job.seniority,
+    description_chars: job.description.length,
     location: job.location,
     compensation: job.compensation,
     required_count: job.requirements.required.length,
@@ -306,5 +235,14 @@ export async function extractJob(url: string, log: Logger): Promise<Job> {
     company: parsed.company,
   })
 
-  return parsed
+  return {
+    job: parsed,
+    decipher: {
+      kind: posting.kind,
+      hops: posting.hops,
+      reason: posting.reason,
+    },
+  }
 }
+
+export { DecipherError }

@@ -17,6 +17,25 @@ export function ensureAbsoluteUrl(input: string): string {
   return `https://${trimmed}`
 }
 
+export function stripTrackingParams(url: string): string {
+  const parsed = new URL(url)
+  for (const key of [...parsed.searchParams.keys()]) {
+    if (/^(utm_|fbclid|gclid|gbraid|wbraid|mc_|igshid)/i.test(key)) {
+      parsed.searchParams.delete(key)
+    }
+  }
+  parsed.hash = ''
+  return parsed.toString()
+}
+
+export function samePage(a: string, b: string): boolean {
+  try {
+    return stripTrackingParams(a) === stripTrackingParams(b)
+  } catch {
+    return a === b
+  }
+}
+
 export async function resolveSourceUrl(input: string, log: Logger): Promise<ResolvedUrl> {
   const requested = ensureAbsoluteUrl(input)
   const parsed = new URL(requested)
@@ -100,5 +119,13 @@ export async function resolveSourceUrl(input: string, log: Logger): Promise<Reso
     })
   }
 
-  return { requested, canonical: current, hops }
+  const canonical = stripTrackingParams(current)
+  if (canonical !== current) {
+    log.info('Removed tracking query parameters from the canonical URL.', {
+      before: current,
+      after: canonical,
+    })
+  }
+
+  return { requested, canonical, hops }
 }

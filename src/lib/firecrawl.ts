@@ -7,6 +7,7 @@ type FirecrawlScrapeResponse = {
   error?: string
   data?: {
     markdown?: string
+    links?: string[]
     metadata?: {
       title?: string
       description?: string
@@ -17,6 +18,15 @@ type FirecrawlScrapeResponse = {
   }
 }
 
+export type ScrapeResult = {
+  url: string
+  markdown: string
+  links: string[]
+  title: string | null
+  statusCode: number | null
+  sourceUrl: string | null
+}
+
 function previewMarkdown(markdown: string): string {
   const firstHeading = markdown.split('\n').find((line) => line.trim().startsWith('#'))
   const firstText = markdown.split('\n').find((line) => line.trim().length > 0) ?? ''
@@ -24,10 +34,10 @@ function previewMarkdown(markdown: string): string {
 }
 
 /**
- * Fetches a URL through Firecrawl and returns clean markdown.
+ * Fetches a URL through Firecrawl and returns markdown plus outbound links.
  * Firecrawl handles JS rendering, anti-bot, and proxying server-side.
  */
-export async function fetchMarkdown(url: string, log: Logger): Promise<string> {
+export async function scrapePage(url: string, log: Logger): Promise<ScrapeResult> {
   const apiKey = process.env.FIRECRAWL_API_KEY
   if (!apiKey) {
     log.error('Cannot scrape because FIRECRAWL_API_KEY is missing from the environment.')
@@ -35,8 +45,8 @@ export async function fetchMarkdown(url: string, log: Logger): Promise<string> {
   }
 
   log.info(
-    'Sending a scrape request to Firecrawl. Firecrawl will render JavaScript, follow site-level redirects, and return markdown instead of raw HTML.',
-    { scrape_url: url, firecrawl_endpoint: FIRECRAWL_SCRAPE_URL, formats: ['markdown'] },
+    'Sending a scrape request to Firecrawl. Firecrawl will render JavaScript, follow site-level redirects, and return markdown plus outbound links.',
+    { scrape_url: url, firecrawl_endpoint: FIRECRAWL_SCRAPE_URL, formats: ['markdown', 'links'] },
   )
 
   const startedAt = performance.now()
@@ -48,7 +58,7 @@ export async function fetchMarkdown(url: string, log: Logger): Promise<string> {
     },
     body: JSON.stringify({
       url,
-      formats: ['markdown'],
+      formats: ['markdown', 'links'],
     }),
   })
 
@@ -83,12 +93,14 @@ export async function fetchMarkdown(url: string, log: Logger): Promise<string> {
 
   const markdown = data?.data?.markdown
   const metadata = data?.data?.metadata
+  const links = data?.data?.links ?? []
 
   log.info('Parsed the Firecrawl JSON payload.', {
     success: data.success ?? null,
     error: data.error ?? null,
     has_markdown: Boolean(markdown),
     markdown_chars: markdown?.length ?? 0,
+    link_count: links.length,
     page_title: metadata?.title ?? null,
     page_status_code: metadata?.statusCode ?? null,
     source_url: metadata?.sourceURL ?? null,
@@ -100,10 +112,18 @@ export async function fetchMarkdown(url: string, log: Logger): Promise<string> {
     throw new Error('Firecrawl returned no markdown content for this URL')
   }
 
-  log.info('Scrape complete. Markdown will be sent to Gemini for structured extraction.', {
+  log.info('Scrape complete.', {
     markdown_chars: markdown.length,
     opening_line: previewMarkdown(markdown),
+    link_count: links.length,
   })
 
-  return markdown
+  return {
+    url,
+    markdown,
+    links,
+    title: metadata?.title ?? null,
+    statusCode: metadata?.statusCode ?? null,
+    sourceUrl: metadata?.sourceURL ?? null,
+  }
 }

@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { extractJob } from './lib/extract'
+import { DecipherError, extractJob } from './lib/extract'
 import { elapsedMs, newRequestId, rootLogger } from './lib/logger'
 import { ensureAbsoluteUrl } from './lib/resolveUrl'
 
@@ -76,15 +76,37 @@ app.post('/extract', async (c) => {
   }
 
   try {
-    const job = await extractJob(rawUrl, log)
+    const { job, decipher } = await extractJob(rawUrl, log)
     log.info('Returning a successful extraction payload to the client.', {
       title: job.title,
       company: job.company,
       source_platform: job.source_platform,
       url: job.url,
+      page_kind: decipher.kind,
+      hops: decipher.hops,
     })
-    return c.json({ job, request_id: requestId })
+    return c.json({ job, decipher, request_id: requestId })
   } catch (err) {
+    if (err instanceof DecipherError) {
+      log.warn('Decipherer stopped without a posting. Returning that outcome to the client instead of a fake job object.', {
+        kind: err.kind,
+        url: err.url,
+        hops: err.hops,
+        error_message: err.message,
+      })
+      return c.json(
+        {
+          error: 'Not a job posting',
+          kind: err.kind,
+          detail: err.message,
+          url: err.url,
+          hops: err.hops,
+          request_id: requestId,
+        },
+        422,
+      )
+    }
+
     log.error('Extraction pipeline failed. Returning 502 to the client.', {
       error_name: err instanceof Error ? err.name : 'unknown',
       error_message: err instanceof Error ? err.message : String(err),
