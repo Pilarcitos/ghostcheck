@@ -1,6 +1,6 @@
 export type LogFields = Record<string, unknown>
 
-const SECRET_FIELD = /^(api_key|apikey|access_token|authorization|password|cookie|secret|firecrawl_api_key|gemini_api_key)$/i
+const SECRET_FIELD = /^(api_key|apikey|access_token|authorization|password|cookie|secret|firecrawl_api_key|gemini_api_key|scrapecreators_api_key)$/i
 
 function serialize(value: unknown): string {
   if (value === null || value === undefined) return String(value)

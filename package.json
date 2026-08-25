@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun run --hot src/index.ts"
+    "dev": "bun run --hot src/index.ts",
+    "collect:links": "bun run scripts/collect-links.ts"
   },
   "dependencies": {
     "hono": "^4.6.0",

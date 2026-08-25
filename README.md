@@ -1,86 +1,81 @@
 # Ghostcheck
 
-Ghostcheck is a **link decipherer** for job postings.
+Ghostcheck turns messy hiring links into one job object — or an honest failure that says what the page actually was.
 
-People do not send clean Greenhouse URLs. They send shorteners, social cards, board listings, “apply here” pages, and ATS forms with the description buried underneath. Ghostcheck’s job is to follow that mess until it is looking at an actual job description, then return one normalized JSON object.
+The current source of those links is Instagram. People post Bandana shorts, bit.ly hops, careers indexes, emails, and flyers. Ghostcheck is two separate steps. They are not wired together yet.
 
-It is not a crawler of the whole internet. One link in, one job out — or an honest failure that says what the page actually was.
+1. **Collect** destination URLs out of an Instagram feed dump.
+2. **Extract** one URL into a structured job (`POST /extract`).
 
-## The decipherer
+It is not a crawler of the whole internet. Collect does not call extract. Extract does not fetch Instagram.
 
-Treat the input as a pointer, not as the posting.
+## What we have
 
-1. **Normalize**  
-   Make the URL fetchable (scheme, obvious tracking junk). Follow HTTP redirects (`loom.ly` → Trakstar, Bandana share links → `/jobs/...`).
+### Collect (`bun run collect:links`)
 
-2. **Classify the page**  
-   After a scrape, decide what you landed on. Do not assume 200 HTML means “this is the job.”
+Input is an Instagram HTML dump or a single `/p/` / `/reel/` URL. HTML is not stored. Output is one file: `data/collected-links.json`. Re-runs merge into that same file.
 
-   | Kind | Meaning | Next move |
-   |---|---|---|
-   | `posting` | One job description | Stop. Extract. |
-   | `listing` | Many jobs / search results | Do not invent a job. Fail or ask for a more specific URL. |
-   | `apply_form` | Application UI wrapped around a JD | Isolate the description. Ignore form fields. |
-   | `gateway` | Shortener, share card, “view job”, “apply on company site” | Follow the real posting URL and classify again. |
-   | `blocked` | Login wall, 404, empty shell | Fail with that reason. Do not hallucinate a title. |
+For each post/reel, [ScrapeCreators](https://docs.scrapecreators.com/v1/instagram/post) `GET /v1/instagram/post` returns caption and accessibility/alt text. Destination http(s) links and emails are pulled from that text, plus `img alt` on the dump.
 
-3. **Hop if needed**  
-   Use whatever the page itself gives you: `Location`, canonical / `og:url`, JSON-LD `JobPosting`, or a single obvious “view this job” link. Cap the hop count. Hostnames are hints (`lever.co`, `bandana.com`), not a hardcoded script per ATS.
+Reels use the same post endpoint. Caption and alt work. The video is not downloaded, played, or transcribed. ScrapeCreators has a separate transcript endpoint (`GET /v2/instagram/media/transcript`, under 2 minutes, 10–30s, AI). We are not calling it.
 
-4. **Extract**  
-   Once the page is a posting, map it onto the job schema with Gemini. Firecrawl gets markdown (JS-rendered). Our code fills `url`, `source_platform`, `scraped_at`, and `raw_description_hash`. Gemini does not get to invent those.
+What collect will miss: a URL that exists only as pixels on a graphic (no caption, no alt), or only spoken in a reel.
 
-Platform is a label on the canonical host, not a switch statement the pipeline depends on. Unknown ATS → still extract if it is a posting.
+### Extract (`POST /extract`)
 
-## Output
+One URL in. Treat it as a pointer, not as the posting.
 
-`POST /extract` with `{ "url": "..." }`.
+1. Normalize and follow HTTP redirects (Bandana `/b/...` → `/jobs/uuid`, `bit.ly` → destination).
+2. Scrape with Firecrawl. Classify: `posting`, `listing`, `apply_form`, `gateway`, or `blocked`.
+3. Hop in-page if it is a gateway (canonical / `og:url` / JSON-LD / “view this job”). Cap is 4.
+4. If it is a single posting or apply form, Gemini maps the page onto `src/schema.ts`. Our code fills `url`, `source_platform`, `scraped_at`, `raw_description_hash`.
 
-```json
-{
-  "job": {
-    "url": "https://canonical-posting.example/jobs/123",
-    "source_platform": "generic",
-    "title": "...",
-    "company": "...",
-    "description": "Plain-language writeup of the role from the posting.",
-    "employment_type": "full_time",
-    "location": { "raw": "...", "remote_type": "hybrid" },
-    "compensation": { "min": 640, "max": 640, "period": "week", "raw": "$640/week" },
-    "requirements": { "required": [], "preferred": [], "degree": "none_stated", "tech_stack": [] },
-    "apply_url": "https://...",
-    "benefits": []
-  },
-  "decipher": {
-    "kind": "posting",
-    "hops": ["https://loom.ly/...", "https://canonical-posting.example/jobs/123"],
-    "reason": "Single job description is the main content."
-  }
-}
-```
+Success is `200` with `{ job, decipher }`. If it never becomes a posting, the response is `422` with `kind` of `listing`, `blocked`, or `hop_limit` — not a hollow job object.
 
-Schema lives in `src/schema.ts`. No auth, no DB, no persistence.
+## What we actually saw
 
-If the decipherer cannot reach a posting, the response is **422** with `kind` of `listing`, `blocked`, or `hop_limit` — not a hollow job object.
+A live pass of the 14 apply-shaped URLs in `data/collected-links.json`:
+
+- **3 extracted.** Bandana share links that are one job (`/b/pptrainee`, `/b/sjmainasst`, `/b/sanconstr`) hopped to `/jobs/{uuid}` and came back as PG&E PowerPathway Trainee and two City of San Jose roles.
+- **4 honest 422s.** Conejo `/apply` and UN Channel were listings. Sonoma `/jobs` was an empty JS shell. `bit.ly/wmswcd-admin` hopped to a blog post that 404'd.
+- **7 crashed with 502.** Gemini returned non-JSON structured output. That includes `bandana.com/b/natpsd`, Oakland GovernmentJobs, and several `/careers` pages. Some of those should have been 422 listings, not extract crashes.
+
+Skipped on purpose: `mailto:`, homepage-only URLs, a truncated `/appl` from OCR.
 
 ## Run
 
 ```
 bun install
-cp .env.example .env   # FIRECRAWL_API_KEY and GEMINI_API_KEY
+cp .env.example .env   # FIRECRAWL_API_KEY, GEMINI_API_KEY, SCRAPECREATORS_API_KEY
 bun run dev
+```
+
+```
+bun run collect:links -- path/to/dump.html
+bun run collect:links -- https://www.instagram.com/p/SHORTCODE/
+bun run collect:links -- path/to/dump.html --dry-run
 ```
 
 ```
 curl -X POST http://localhost:3000/extract \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://loom.ly/lHwa8zQ"}'
+  -d '{"url": "https://bandana.com/b/sjmainasst"}'
 ```
 
-Logs are verbose on purpose: each hop, scrape, and Gemini parse is a timestamped line with a `request_id`. No emojis.
+Logs are verbose on purpose. Each hop, scrape, and Gemini parse is a timestamped line with a `request_id`.
 
-## What is built vs next
+`data/*.html` and `data/*.json` are gitignored. Keys stay in `.env`.
 
-**Built:** HTTP redirects, page classification, in-page hops (capped), structured extract with a `description` field, and honest 422s when the page is a listing or blocked.
+## Open questions
 
-**Still hard:** login walls, JS-only buttons with no real URL, and picking one job off a multi-job board (that should stay a listing failure).
+These are real product choices, not polish.
+
+1. **Wire collect to extract?** Right now you collect, then we pick URLs by hand and hit `/extract`. Should collect auto-extract every http(s) link, only paths that look like jobs (`/b/`, `/jobs`, `/careers`, bit.ly), or stay two-step?
+2. **Reels — transcript or not?** Caption+alt already works. Transcript is slow, only under 2 minutes, and costs extra. Worth it when a hiring URL is spoken and never written?
+3. **Listings.** Conejo `/apply` had three seasonal roles. Stay 422, return the list of posting URLs, or pick one?
+4. **Gemini 502s.** Same failure on 7 URLs: non-JSON structured output. Fix the parser, treat it as `blocked`, or re-classify those pages as listings before Gemini runs?
+5. **mailto: and “DM us”.** Collect keeps emails. Extract cannot fetch them. Keep as apply contacts, drop them, or stop at collect?
+6. **Non-job posts.** The dump included ASMR, tacos, and a tree-care event. Filter before spending ScrapeCreators credits, or collect everything and sort later?
+7. **OCR.** Flyer URLs with no caption and no alt are invisible to us. Add OCR, or accept that miss?
+
+Until those are decided: collect stays a link list. Extract stays one URL in, one job out.

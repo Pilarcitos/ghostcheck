@@ -12,3 +12,7 @@ node_modules/
 
 # build
 dist/
+
+# local dumps from the Instagram link collector
+data/*.html
+data/*.json
