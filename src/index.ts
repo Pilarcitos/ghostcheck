@@ -16,6 +16,9 @@ app.use('*', async (c, next) => {
   c.set('requestId', requestId)
 
   const log = rootLogger.child('http', { request_id: requestId })
+  if (c.req.path !== '/health') {
+    log.banner(`${c.req.method} ${c.req.path}`, `started ${new Date().toISOString()}`)
+  }
   log.info('Incoming HTTP request.', {
     method: c.req.method,
     path: c.req.path,
@@ -25,10 +28,17 @@ app.use('*', async (c, next) => {
 
   await next()
 
+  const status = c.res.status
+  if (c.req.path !== '/health') {
+    log.banner(
+      `${status}  ${c.req.method} ${c.req.path}`,
+      `${elapsedMs(startedAt)}ms  request_id=${requestId}`,
+    )
+  }
   log.info('HTTP request completed.', {
     method: c.req.method,
     path: c.req.path,
-    status: c.res.status,
+    status,
     elapsed_ms: elapsedMs(startedAt),
   })
 })
@@ -63,6 +73,7 @@ app.post('/extract', async (c) => {
   try {
     absolute = ensureAbsoluteUrl(rawUrl)
     const parsed = new URL(absolute)
+    log.section('accept url')
     log.info('Accepted the extract request and parsed the URL.', {
       client_url: rawUrl,
       absolute_url: absolute,
@@ -88,11 +99,13 @@ app.post('/extract', async (c) => {
     return c.json({ job, decipher, request_id: requestId })
   } catch (err) {
     if (err instanceof DecipherError) {
+      log.section('stopped — not a posting')
       log.warn('Decipherer stopped without a posting. Returning that outcome to the client instead of a fake job object.', {
         kind: err.kind,
         url: err.url,
         hops: err.hops,
         error_message: err.message,
+        likely_cause: `Page classified as ${err.kind}. Ghostcheck will not invent a job object from a listing, block, or hop limit.`,
       })
       return c.json(
         {
@@ -107,10 +120,15 @@ app.post('/extract', async (c) => {
       )
     }
 
+    log.section('failed — 502')
     log.error('Extraction pipeline failed. Returning 502 to the client.', {
       error_name: err instanceof Error ? err.name : 'unknown',
       error_message: err instanceof Error ? err.message : String(err),
       stack: err instanceof Error ? err.stack : null,
+      likely_cause:
+        err instanceof Error && err.message.includes('non-JSON')
+          ? 'Gemini returned truncated or invalid JSON. Check finish_reason (MAX_TOKENS means the output budget ran out, often on thinking tokens).'
+          : 'An upstream scrape, classify, or extract step threw. Read the ERROR block above this line for the first failure.',
     })
     return c.json(
       {

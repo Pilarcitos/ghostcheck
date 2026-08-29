@@ -19,8 +19,8 @@ const CLASSIFY_SCHEMA = {
       type: 'STRING',
       enum: ['posting', 'listing', 'apply_form', 'gateway', 'blocked'],
     },
-    reason: { type: 'STRING' },
-    next_url: { type: 'STRING', nullable: true },
+    reason: { type: 'STRING', maxLength: 200 },
+    next_url: { type: 'STRING', nullable: true, maxLength: 500 },
   },
   required: ['kind', 'reason', 'next_url'],
 } as const
@@ -85,15 +85,16 @@ export async function classifyPage(page: ScrapeResult, log: Logger): Promise<Pag
     return blocked
   }
 
-  const linkSample = page.links.slice(0, 40)
-  const prompt = `Classify this fetched page. It was reached from a URL that might or might not already be a job posting.
+  const linkSample = page.links.slice(0, 20)
+  const markdown = page.markdown.length > 8000 ? `${page.markdown.slice(0, 8000)}\n\n[truncated]` : page.markdown
+  const prompt = `Classify this fetched page. Return only the JSON object. Keep reason to one short sentence (under 200 characters). Do not write an essay.
 
 kind must be exactly one of:
 - posting: the main content is a single job description (duties, qualifications, pay, location).
 - listing: a job board, search results, or company careers index with multiple jobs. Do not pick one of them.
 - apply_form: an application form is prominent, but a job description is also on the page.
-- gateway: this is not the posting. It points at one job URL (share card, "view job", "apply on company site", interstitial). Set next_url to that absolute http(s) URL.
-- blocked: login wall, 404, empty shell, captcha. next_url must be null.
+- gateway: this is not the posting. It points at one job URL (share card, "view job", "apply on company site", interstitial, PDF). Set next_url to that absolute http(s) URL.
+- blocked: login wall, 404, empty shell, captcha, or not a job at all (event, homepage). next_url must be null.
 
 Rules:
 - If many job links are present and there is no single detailed description, kind is listing and next_url is null.
@@ -106,7 +107,7 @@ HTTP status from scrape: ${page.statusCode ?? '(unknown)'}
 Outbound links (sample): ${JSON.stringify(linkSample)}
 
 Page markdown:
-${page.markdown}`
+${markdown}`
 
   log.info('Asking Gemini to classify the page kind so the pipeline can hop or stop.', {
     url: page.url,
@@ -117,18 +118,33 @@ ${page.markdown}`
   const raw = await generateJson({
     prompt,
     schema: CLASSIFY_SCHEMA,
-    maxOutputTokens: 512,
+    maxOutputTokens: 2048,
+    thinkingLevel: 'minimal',
     log: log.child('gemini'),
   })
 
   const parsed = raw as { kind?: string; reason?: string; next_url?: string | null }
+  if (!PAGE_KINDS.includes(parsed.kind as PageKind)) {
+    log.warn('Gemini returned an unknown page kind. Falling back to posting so extraction can still try.', {
+      raw_kind: parsed.kind ?? null,
+      raw_reason: parsed.reason ?? null,
+      raw_next_url: parsed.next_url ?? null,
+      likely_cause: 'Classification JSON did not use posting|listing|apply_form|gateway|blocked.',
+    })
+  }
   const kind = PAGE_KINDS.includes(parsed.kind as PageKind) ? (parsed.kind as PageKind) : 'posting'
   const nextUrl = kind === 'gateway' ? normalizeNextUrl(parsed.next_url ?? null, page.url, page.links) : null
 
   if (kind === 'gateway' && !nextUrl) {
     log.warn(
       'Gemini labeled the page as a gateway but did not provide a usable next URL. Treating it as a posting so extraction can still run if the description is on this page.',
-      { claimed_next_url: parsed.next_url ?? null },
+      {
+        claimed_next_url: parsed.next_url ?? null,
+        page_url: page.url,
+        link_count: page.links.length,
+        likely_cause:
+          'kind=gateway requires next_url. The claimed URL was missing, not http(s), or could not be resolved against the page URL.',
+      },
     )
     return {
       kind: 'posting',

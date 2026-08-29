@@ -226,6 +226,7 @@ export async function collectLinks(argv: string[]) {
   if (!input) printUsage()
 
   const log = rootLogger.child('collect')
+  log.banner('collect links', `${input}${dryRun ? '  (dry-run)' : ''}`)
   const startedAt = performance.now()
   const { html, directPosts } = await loadInput(input, log)
 
@@ -278,6 +279,7 @@ export async function collectLinks(argv: string[]) {
         index: index + 1,
         of: posts.length,
       })
+      postLog.section(`post ${index + 1} of ${posts.length}  ${post.kind}  ${post.shortcode}`)
       if (post.kind === 'reel') {
         postLog.info(
           'This is a reel. Collecting caption and accessibility text only. The video is not downloaded, played, or transcribed.',
@@ -289,7 +291,10 @@ export async function collectLinks(argv: string[]) {
         const data = await fetchInstagramPost(post.postUrl, apiKey, postLog)
         const media = mediaFromResponse(data)
         if (!media) {
-          postLog.warn('ScrapeCreators JSON did not include xdt_shortcode_media. Skipping caption parse.')
+          postLog.warn('ScrapeCreators JSON did not include xdt_shortcode_media. Skipping caption parse.', {
+            post_url: post.postUrl,
+            likely_cause: 'The lookup succeeded but the payload had no media object. The shortcode may be private, deleted, or an unsupported reel/audio URL.',
+          })
           postResults.push({
             postUrl: post.postUrl,
             shortcode: post.shortcode,
@@ -338,7 +343,12 @@ export async function collectLinks(argv: string[]) {
         collected.push(...links)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
-        postLog.error('Failed to collect links from this post.', { error_message: message })
+        postLog.error('Failed to collect links from this post.', {
+          error_message: message,
+          post_url: post.postUrl,
+          shortcode: post.shortcode,
+          likely_cause: 'ScrapeCreators lookup or JSON parse failed for this shortcode. Caption and links for this post were skipped; collection continues.',
+        })
         postResults.push({
           postUrl: post.postUrl,
           shortcode: post.shortcode,
@@ -367,24 +377,15 @@ export async function collectLinks(argv: string[]) {
   await mkdir(resolve(resolvedOut, '..'), { recursive: true })
   await writeFile(resolvedOut, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
 
+  log.banner(
+    'collect done',
+    `${payload.links.length} unique links  ·  ${payload.post_count} posts  ·  ${elapsedMs(startedAt)}ms`,
+  )
   log.info('Link collection finished. Ghostcheck extract was not called. All links live in this one JSON.', {
-    total_elapsed_ms: elapsedMs(startedAt),
+    out_path: resolvedOut,
     unique_link_count: payload.links.length,
     post_count: payload.post_count,
     merged_existing: Boolean(existing),
-    out_path: resolvedOut,
+    links: payload.links,
   })
-
-  console.log(
-    JSON.stringify(
-      {
-        unique_link_count: payload.links.length,
-        post_count: payload.post_count,
-        out_path: resolvedOut,
-        links: payload.links,
-      },
-      null,
-      2,
-    ),
-  )
 }

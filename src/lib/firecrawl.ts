@@ -74,8 +74,19 @@ export async function scrapePage(url: string, log: Logger): Promise<ScrapeResult
 
   if (!res.ok) {
     log.error('Firecrawl rejected the scrape request. Extraction cannot continue without page content.', {
+      scrape_url: url,
       status: res.status,
+      status_text: res.statusText,
+      elapsed_ms,
       body: rawBody,
+      likely_cause:
+        res.status === 401 || res.status === 403
+          ? 'FIRECRAWL_API_KEY was rejected.'
+          : res.status === 402
+            ? 'Firecrawl credits are exhausted.'
+            : res.status === 429
+              ? 'Firecrawl rate limited this scrape. Wait and retry.'
+              : 'Firecrawl HTTP error. Body is dumped above.',
     })
     throw new Error(`Firecrawl request failed (${res.status}): ${rawBody}`)
   }
@@ -85,8 +96,10 @@ export async function scrapePage(url: string, log: Logger): Promise<ScrapeResult
     data = JSON.parse(rawBody) as FirecrawlScrapeResponse
   } catch (err) {
     log.error('Firecrawl returned a non-JSON body even though the HTTP status was successful.', {
+      scrape_url: url,
       parse_error: err instanceof Error ? err.message : String(err),
       body: rawBody,
+      likely_cause: 'Firecrawl HTTP 200 but the body was not JSON. Dump is above.',
     })
     throw new Error('Firecrawl returned invalid JSON')
   }
@@ -108,7 +121,20 @@ export async function scrapePage(url: string, log: Logger): Promise<ScrapeResult
   })
 
   if (!markdown) {
-    log.error('Firecrawl JSON did not include markdown. The page may have blocked the scrape or returned an empty body.')
+    log.error('Firecrawl JSON did not include markdown. The page may have blocked the scrape or returned an empty body.', {
+      scrape_url: url,
+      success: data.success ?? null,
+      error: data.error ?? null,
+      page_title: metadata?.title ?? null,
+      page_status_code: metadata?.statusCode ?? null,
+      source_url: metadata?.sourceURL ?? null,
+      link_count: links.length,
+      body: rawBody,
+      likely_cause:
+        data.error
+          ? `Firecrawl error field: ${data.error}`
+          : 'No markdown in the payload. The site may have blocked the scrape or returned an empty shell.',
+    })
     throw new Error('Firecrawl returned no markdown content for this URL')
   }
 

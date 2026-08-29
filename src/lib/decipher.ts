@@ -43,6 +43,7 @@ export async function decipherToPosting(inputUrl: string, log: Logger): Promise<
   let currentUrl = httpResolved.canonical
   const visited = new Set<string>(hops.map(stripTrackingParams))
 
+  log.section('follow redirects')
   log.info(
     'Starting the decipherer loop. Each iteration scrapes one page, classifies it, and either stops on a posting or follows one in-page hop.',
     {
@@ -53,6 +54,7 @@ export async function decipherToPosting(inputUrl: string, log: Logger): Promise<
   )
 
   for (let i = 0; i < MAX_PAGE_HOPS; i++) {
+    log.section(`scrape ${i + 1} of ${MAX_PAGE_HOPS}`)
     log.info('Decipherer scrape iteration.', {
       iteration: i + 1,
       url: currentUrl,
@@ -63,6 +65,7 @@ export async function decipherToPosting(inputUrl: string, log: Logger): Promise<
     const classification = await classifyPage(page, log.child('classify'))
 
     if (classification.kind === 'posting' || classification.kind === 'apply_form') {
+      log.section('posting found — stop hopping')
       log.info('Decipherer found a page that contains a job description. Stopping hops and moving to extraction.', {
         kind: classification.kind,
         reason: classification.reason,
@@ -109,6 +112,7 @@ export async function decipherToPosting(inputUrl: string, log: Logger): Promise<
       }
     }
 
+    log.section('in-page hop')
     log.info('Following an in-page hop to a better candidate URL.', {
       from: currentUrl,
       to: nextUrl,

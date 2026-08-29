@@ -180,6 +180,7 @@ export type ExtractResult = {
 
 export async function extractJob(url: string, log: Logger): Promise<ExtractResult> {
   const pipelineStartedAt = performance.now()
+  log.section('pipeline')
   log.info(
     'Starting job extraction. Steps: decipher the link to a posting, extract fields with Gemini, validate the job object.',
     { client_url: url },
@@ -201,6 +202,7 @@ export async function extractJob(url: string, log: Logger): Promise<ExtractResul
     raw_description_hash: hash,
   })
 
+  log.section('extract fields')
   const fields = await extractFields(markdown, scrapeUrl, posting.kind, log.child('gemini'))
 
   const job: Job = {

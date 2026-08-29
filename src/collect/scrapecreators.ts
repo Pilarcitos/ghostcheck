@@ -56,7 +56,16 @@ export async function fetchInstagramPost(
   if (!res.ok) {
     log.error('ScrapeCreators rejected the post lookup.', {
       status: res.status,
+      status_text: res.statusText,
+      elapsed_ms: elapsedMs(startedAt),
+      post_url: postUrl,
       body: rawBody,
+      likely_cause:
+        res.status === 401 || res.status === 403
+          ? 'SCRAPECREATORS_API_KEY was rejected.'
+          : res.status === 429
+            ? 'ScrapeCreators rate limited this lookup.'
+            : 'ScrapeCreators HTTP error. Body is dumped above.',
     })
     throw new Error(`ScrapeCreators request failed (${res.status}): ${rawBody}`)
   }
